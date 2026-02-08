@@ -25,7 +25,6 @@ jobs:
             const script = require('./.github/workflows/pr-digest.js');
             await script({ github, core });
 
-
       - name: Post to Slack (curl)
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

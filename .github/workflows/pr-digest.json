@@ -1,0 +1,12 @@
+{
+  "org": "YOUR_ORG",
+  "repos": [
+    "YOUR_ORG/REPO1",
+    "YOUR_ORG/REPO2"
+  ],
+  "users": [
+    "USER"
+  ],
+  "max_prs_per_repo": 25,
+  "max_total_prs": 200
+}

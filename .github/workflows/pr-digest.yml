@@ -1,8 +1,8 @@
-name: Team PR Digest to Slack
+name: PR Digest to Slack (Repos + Users)
 
 on:
   schedule:
-    - cron: "0 13 * * 1-5" # 13:00 UTC weekdays (adjust)
+    - cron: "0 13 * * 1-5"
   workflow_dispatch:
 
 permissions:
@@ -12,138 +12,28 @@ permissions:
 jobs:
   pr-digest:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Generate PR digest for team
+      - uses: actions/checkout@v4
+
+      - name: Generate digest
         id: digest
         uses: actions/github-script@v7
         env:
-          ORG: YOUR_ORG
-          TEAM_SLUG: your-team-slug
+          PR_DIGEST_CONFIG: .github/workflows/pr-digest.json
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const org = process.env.ORG;
-            const teamSlug = process.env.TEAM_SLUG;
+            const script = require('./.github/workflows/pr-digest.js');
+            await script({ github, core });
 
-            const query = `
-              query($org:String!, $teamSlug:String!, $after:String) {
-                organization(login:$org) {
-                  team(slug:$teamSlug) {
-                    repositories(first:100, after:$after) {
-                      nodes {
-                        name
-                        nameWithOwner
-                        pullRequests(states: OPEN, first: 50, orderBy: {field: CREATED_AT, direction: ASC}) {
-                          nodes {
-                            title
-                            url
-                            createdAt
-                            author { login }
-                            additions
-                            deletions
-                            isDraft
-                          }
-                        }
-                      }
-                      pageInfo { hasNextPage endCursor }
-                    }
-                  }
-                }
-              }
-            `;
 
-            function daysOpen(createdAtIso) {
-              const created = new Date(createdAtIso).getTime();
-              const now = Date.now();
-              const diffDays = Math.floor((now - created) / (1000 * 60 * 60 * 24));
-              return diffDays;
-            }
-
-            // Pagination over team repositories
-            let after = null;
-            let repos = [];
-            for (;;) {
-              const res = await github.graphql(query, { org, teamSlug, after });
-              const team = res?.organization?.team;
-              if (!team) {
-                core.setFailed(`Could not find team ${org}/${teamSlug}. Check ORG and TEAM_SLUG.`);
-                return;
-              }
-
-              const page = team.repositories;
-              repos.push(...(page.nodes || []));
-              if (!page.pageInfo.hasNextPage) break;
-              after = page.pageInfo.endCursor;
-            }
-
-            // Build digest grouped by repo with open PRs
-            const reposWithPRs = repos
-              .map(r => ({
-                repo: r.nameWithOwner,
-                prs: (r.pullRequests?.nodes || []).map(pr => ({
-                  title: pr.title,
-                  url: pr.url,
-                  createdAt: pr.createdAt,
-                  days: daysOpen(pr.createdAt),
-                  author: pr.author?.login || "unknown",
-                  additions: pr.additions ?? 0,
-                  deletions: pr.deletions ?? 0,
-                  isDraft: !!pr.isDraft,
-                }))
-              }))
-              .filter(r => r.prs.length > 0);
-
-            // Sort repos alpha, PRs by oldest first
-            reposWithPRs.sort((a,b) => a.repo.localeCompare(b.repo));
-            for (const r of reposWithPRs) r.prs.sort((a,b) => b.days - a.days); // oldest first (bigger days)
-
-            // Slack formatting (mrkdwn)
-            const today = new Date().toISOString().slice(0,10);
-            let header = `*PR Digest — ${org}/${teamSlug} — ${today}*`;
-            let totalPrs = reposWithPRs.reduce((sum, r) => sum + r.prs.length, 0);
-
-            if (totalPrs === 0) {
-              const text = `${header}\n_No open PRs found across team repositories._`;
-              core.setOutput("slack_text", text);
-              return;
-            }
-
-            // Limit to avoid huge Slack messages (tweak as needed)
-            const MAX_REPOS = 30;
-            const MAX_PRS_PER_REPO = 25;
-
-            let lines = [];
-            lines.push(header);
-            lines.push(`Open PRs: *${totalPrs}* across *${reposWithPRs.length}* repos`);
-
-            const slicedRepos = reposWithPRs.slice(0, MAX_REPOS);
-            for (const r of slicedRepos) {
-              lines.push(`\n*${r.repo}* — ${r.prs.length} open`);
-              const slicedPRs = r.prs.slice(0, MAX_PRS_PER_REPO);
-              for (const pr of slicedPRs) {
-                const draftTag = pr.isDraft ? " _(draft)_" : "";
-                lines.push(`• <${pr.url}|${pr.title}> — *${pr.days}d* open — @${pr.author} — \`+${pr.additions}/-${pr.deletions}\`${draftTag}`);
-              }
-              if (r.prs.length > MAX_PRS_PER_REPO) {
-                lines.push(`  _…and ${r.prs.length - MAX_PRS_PER_REPO} more PRs in this repo_`);
-              }
-            }
-
-            if (reposWithPRs.length > MAX_REPOS) {
-              lines.push(`\n_…and ${reposWithPRs.length - MAX_REPOS} more repos with open PRs_`);
-            }
-
-            const slackText = lines.join("\n");
-            core.setOutput("slack_text", slackText);
-
-      - name: Post to Slack
-        uses: slackapi/slack-github-action@v2.0.0
-        with:
-          payload: |
-            {
-              "text": "${{ steps.digest.outputs.slack_text }}"
-            }
+      - name: Post to Slack (curl)
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+          SLACK_TEXT: ${{ steps.digest.outputs.slack_text }}
+        run: |
+          payload=$(python3 - << 'PY'
+          import json, os
+          print(json.dumps({"text": os.environ.get("SLACK_TEXT","")}))
+          PY
+          )
+          curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
